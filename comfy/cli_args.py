@@ -113,6 +113,8 @@ parser.add_argument("--fp16-intermediates", action="store_true", help="Experimen
 parser.add_argument("--force-channels-last", action="store_true", help="Force channels last format when inferencing the models.")
 
 parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE", const=-1, help="Use torch-directml.")
+parser.add_argument("--tpu", action="store_true", help="Use a TPU through PyTorch/XLA. Requires the optional torch-xla runtime.")
+parser.add_argument("--tpu-cache-dir", type=str, default=None, metavar="PATH", help="Writable PyTorch/XLA compilation cache directory. Defaults to .cache/tpu_xla.")
 
 parser.add_argument("--oneapi-device-selector", type=str, default=None, metavar="SELECTOR_STRING", help="Sets the oneAPI device(s) this instance will use.")
 parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like if the device supports fp8 compute.")
