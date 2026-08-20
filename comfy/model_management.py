@@ -66,6 +66,8 @@ tpu_runtime = None
 if tpu_enabled:
     from comfy import tpu as tpu_runtime
     tpu_runtime.initialize(args.tpu_cache_dir)
+    args.disable_pinned_memory = True
+    args.disable_async_offload = True
 
 
 # Training Related State
@@ -396,7 +398,7 @@ except AttributeError:
     ACCELERATOR_ERROR = RuntimeError
 
 def is_oom(e):
-    if tpu_enabled and isinstance(e, RuntimeError) and "out of memory" in str(e).lower():
+    if tpu_enabled and isinstance(e, RuntimeError) and tpu_runtime.is_oom(e):
         return True
     if isinstance(e, OOM_EXCEPTION):
         return True
@@ -436,6 +438,8 @@ else:
 
 def is_nvidia():
     global cpu_state
+    if tpu_enabled:
+        return False
     if cpu_state == CPUState.GPU:
         if torch.version.cuda:
             return True
@@ -443,6 +447,8 @@ def is_nvidia():
 
 def is_amd():
     global cpu_state
+    if tpu_enabled:
+        return False
     if cpu_state == CPUState.GPU:
         if torch.version.hip:
             return True
@@ -543,7 +549,7 @@ except:
     pass
 
 
-if ENABLE_PYTORCH_ATTENTION:
+if ENABLE_PYTORCH_ATTENTION and not tpu_enabled:
     torch.backends.cuda.enable_math_sdp(True)
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
@@ -1207,7 +1213,7 @@ def text_encoder_device():
     if args.gpu_only:
         return get_torch_device()
     elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM) or comfy.memory_management.aimdo_enabled:
-        if should_use_fp16(prioritize_performance=False):
+        if tpu_enabled or should_use_fp16(prioritize_performance=False):
             return get_torch_device()
         else:
             return torch.device("cpu")
@@ -1334,6 +1340,8 @@ def pick_weight_dtype(dtype, fallback_dtype, device=None):
     return dtype
 
 def device_supports_non_blocking(device):
+    if is_device_tpu(device):
+        return False
     if args.force_non_blocking:
         return True
     if is_device_mps(device):
@@ -2058,7 +2066,9 @@ def lora_compute_dtype(device):
     if dtype is not None:
         return dtype
 
-    if should_use_fp16(device):
+    if tpu_enabled:
+        dtype = torch.bfloat16
+    elif should_use_fp16(device):
         dtype = torch.float16
     else:
         dtype = torch.float32

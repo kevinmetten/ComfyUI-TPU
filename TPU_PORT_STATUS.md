@@ -45,3 +45,27 @@ Status: **IMPLEMENTED**, **STATICALLY TESTED**, **SOFTWARE TESTED ON CPU WITH MO
 ## Failed experiments and remaining limitations
 
 GitHub clone and web research were blocked by the environment. PyTorch/XLA was not installed and no TPU device was available. Efficient native INT8/ConvRot, fallback traces, stable graph counts across real workflows, transfer overlap, video inference, and a possible Comfy Kitchen TPU kernel must be decided from the notebook's real-v5e probe and profiler output.
+
+## Fixes in this review pass
+
+- Memory reporting now uses the public `torch_xla.core.xla_model.get_memory_info()` API. Modern `bytes_limit`/`bytes_used` results are normalized to total/free bytes; the older public kilobyte result is accepted by a validated compatibility adapter. Private `_XLAC` memory calls are no longer used.
+- Synchronization now calls `torch_xla.sync(wait=True)`. Probe timings bracket two independently completed executions and distinguish first execution from the repeated execution.
+- TPU initialization is idempotent for the same compilation cache and rejects cache changes after the XLA device exists.
+- The Colab notebook uses `https://github.com/kevinmetten/ComfyUI-TPU.git` and the existing `codex/build-comfyui-backend-for-google-colab-tpu` PR branch from one configuration cell. Change only `BRANCH` to `master` after merge.
+- Colab installs Torch, TorchVision, TorchAudio, PyTorch/XLA, and the TPU runtime through one resolver transaction when the existing Torch/XLA major-minor versions are not compatible. ComfyUI requirements are installed without subsequently replacing that resolved stack.
+- The probe directly executes Comfy Kitchen rowwise/tensorwise INT8 quantization, activation rotation/quantization, ConvRot weight quantization, simple/ConvRot dequantization, `int8_linear`, and end-to-end ConvRot `int8_linear`, with device/dtype/finite/error metadata and XLA metrics/compiler artifacts.
+- Cache manifests now record detected environment, Python, Torch, XLA, libtpu, ComfyUI, and Comfy Kitchen source/version/commit information. Imports warn about version differences without rejecting or deleting cache entries.
+- CUDA SDPA global configuration, CUDA pinned memory, non-blocking transfer claims, and async offload are disabled for TPU. Generic smart-memory movement and synchronous CPU staging remain enabled.
+
+## Still pending hardware validation
+
+- Actual Colab v5e-1 device boot and HBM reporting.
+- Real ComfyUI model inference and frontend workflow completion.
+- Native INT8 lowering/HLO and CPU-fallback analysis.
+- INT8 ConvRot correctness and performance on realistic transformer layers.
+- SDPA throughput and peak HBM.
+- Current video-model inference.
+- Compilation reuse across sampler steps and restored sessions.
+- Dynamic offload behavior and oversized-model staging.
+- Portable cache reuse across independent Colab sessions.
+- Compilation, steady execution, host transfer, HBM, and host-RAM profiling.
