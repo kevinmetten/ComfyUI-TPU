@@ -32,6 +32,10 @@ Import before starting ComfyUI or the probe. The archive manifest is diagnostic;
 
 `--diagnostics diagnostics` enables PyTorch/XLA debug metrics and compiler dumps. Preserve `tpu_probe.json`, the diagnostics directory, and the ComfyUI startup log after the first hardware run.
 
+The Colab probe also enables `--int8-experiments --large`, comparing `_int_mm`, generic INT8 matmul, and an INT32-matmul candidate at 32×4096 and 256×4096 shapes against a CPU INT32-accumulation reference. Operation records distinguish output placement from CPU fallback and full XLA-native execution. The current Kitchen `_int_mm` path is expected to remain a correctness fallback until a dedicated s8×s8→s32 TPU lowering is implemented and validated.
+
 The notebook runs `tools.tpu_colab_setup`, which queries the official TPU wheel index for the latest stable PyTorch/XLA release, asks pip's resolver for the exact matching Torch, TorchVision, TorchAudio, and libtpu tuple, and installs those exact versions together. A complete compatible installed tuple is retained. The filtered ComfyUI requirements install is followed by an exact version check so it cannot silently replace the selected TPU stack.
 
 Every probe measurement starts with a blocking barrier, times only the named operation, and ends with another blocking barrier. Inputs are created once outside kernel timing. Comfy Kitchen prerequisites are recorded and synchronized as their own operations; a failed prerequisite marks dependent operations as blocked. Metrics snapshots are written after core operations and before/after Kitchen operations. The first execution of each new shape may compile. Keep batch, latent dimensions, frame count, and token length stable across sampler steps to maximize reuse. No hardware performance claim is made until v5e artifacts are collected.
+
+TPU detection accepts legacy Colab address/name variables, `TPU_ACCELERATOR_TYPE`, `/dev/accel*`, and numeric `/dev/vfio/<group>` devices. The launch cell waits for HTTP 200 before starting cloudflared and remains active with a 60-second heartbeat; stopping the cell terminates only the child processes it created.

@@ -38,13 +38,17 @@ The writable cache is initialized before the first device is created. Empty firs
 
 Open `colab/ComfyUI_TPU_v5e.ipynb`, select a v5e-1 TPU runtime, execute setup, optionally import a cache ZIP, run the probe, and launch the server/tunnel cells. Models may live in Colab storage or paths configured through `extra_model_paths.yaml`; Drive and Hugging Face downloads remain explicitly user initiated.
 
-## Hardware validation and performance
+## Hardware validated on real Colab v5e-1
 
-Status: **IMPLEMENTED**, **STATICALLY TESTED**, **SOFTWARE TESTED ON CPU WITH MOCKED XLA**, **TPU HARDWARE VALIDATION PENDING**. No v5e was exposed to this environment, so minimal ComfyUI inference, real INT8, ConvRot, video, oversized-model staging, HLO inspection, compilation timing, sampling speed, HBM peak, host RAM, and transfer/offload measurements are not claimed.
+The first hardware run validated XLA device creation, 16,909,336,576-byte HBM reporting, FP32/BF16/FP16 matmul, BF16 linear and conv2d, layer norm, SDPA, RoPE-style operations, generic INT8 matmul, non-contiguous operations, host/TPU transfers, eager Kitchen quantization, functional Kitchen INT8 and ConvRot linear, ComfyUI startup, PyTorch attention selection, and a persistent Cloudflare heartbeat launch. Current v5e detection additionally covers `TPU_ACCELERATOR_TYPE` and numeric VFIO groups.
+
+## Hardware issue discovered
+
+Comfy-Kitchen 0.2.31 eager `int8_linear` calls `torch._int_mm`. PyTorch/XLA 2.9 reported four `aten::_int_mm` CPU fallbacks for the two normal and two ConvRot executions. Generic INT8 matmul is XLA-native but returns INT8 and cannot replace the required INT32 accumulation. The correctness fallback remains; fully TPU-native Kitchen INT8 is not claimed.
 
 ## Failed experiments and remaining limitations
 
-GitHub clone and web research were blocked by the environment. PyTorch/XLA was not installed and no TPU device was available. Efficient native INT8/ConvRot, fallback traces, stable graph counts across real workflows, transfer overlap, video inference, and a possible Comfy Kitchen TPU kernel must be decided from the notebook's real-v5e probe and profiler output.
+The validated generic INT8 matmul cannot replace `_int_mm`: it returns INT8 and overflowed a simple wide-accumulation example, whereas `_int_mm` returned INT32. Local research access to upstream repositories remains blocked, and this environment has no TPU, so an unvalidated production kernel was not substituted. The next implementation boundary is a Comfy-Kitchen TPU backend with an s8×s8→s32 lowering, validated by the new experiment harness before dispatch is enabled.
 
 ## Fixes in this review pass
 
@@ -59,16 +63,11 @@ GitHub clone and web research were blocked by the environment. PyTorch/XLA was n
 
 ## Still pending hardware validation
 
-- Actual Colab v5e-1 device boot and HBM reporting.
-- Real ComfyUI model inference and frontend workflow completion.
-- Native INT8 lowering/HLO and CPU-fallback analysis.
-- INT8 ConvRot correctness and performance on realistic transformer layers.
-- SDPA throughput and peak HBM.
-- Current video-model inference.
-- Compilation reuse across sampler steps and restored sessions.
-- Dynamic offload behavior and oversized-model staging.
-- Portable cache reuse across independent Colab sessions.
-- Compilation, steady execution, host transfer, HBM, and host-RAM profiling.
+- Fully TPU-native Comfy-Kitchen wide-accumulation INT8 linear.
+- Real checkpoint inference and MiniMax H3 INT8 ConvRot.
+- Current video-model inference and performance comparison with T4.
+- Dynamic offload behavior, oversized-model staging, and real-model HBM peaks.
+- Compilation reuse across sampler steps and portable cache reuse in a fresh Colab session.
 
 ## Final static hardening before v5e validation
 

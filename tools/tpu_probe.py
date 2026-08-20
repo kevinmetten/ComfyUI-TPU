@@ -3,6 +3,7 @@ import argparse
 import json
 import math
 import os
+import re
 import time
 from pathlib import Path
 
@@ -48,7 +49,11 @@ def operation_result(name, status="blocked", blocked_by=None):
         "second_execution_seconds": None,
         "dtype": None,
         "shape": None,
-        "device": None,
+        "output_device": None,
+        "output_on_xla": False,
+        "cpu_fallback_detected": False,
+        "fully_xla_native": False,
+        "fallback_ops": [],
         "finite": None,
         "max_abs_error": None,
         "mean_abs_error": None,
@@ -58,18 +63,30 @@ def operation_result(name, status="blocked", blocked_by=None):
     }
 
 
+def classify_execution(result, output_on_xla, fallback_ops):
+    result["output_on_xla"] = output_on_xla
+    result["fallback_ops"] = sorted(fallback_ops)
+    result["cpu_fallback_detected"] = bool(fallback_ops)
+    result["fully_xla_native"] = output_on_xla and not fallback_ops
+    result["status"] = "functional_passed_with_fallback" if fallback_ops else ("native_passed" if output_on_xla else "functional_passed")
+
+
 def execute_operation(name, fn, reference=None):
     result = operation_result(name)
     durations = []
     value = None
     try:
-        for _ in range(2):
+        counters_before = None
+        for execution in range(2):
             tpu.sync()
+            if execution == 0:
+                counters_before = metrics_counters()
             started = time.perf_counter()
             value = fn()
             tpu.sync()
             durations.append(time.perf_counter() - started)
-        result["status"] = "passed"
+        counters_after = metrics_counters()
+        fallback_ops = sorted(name for name, value in counter_delta(counters_before, counters_after).items() if value > 0 and name.startswith("aten::"))
         result["first_execution_seconds"] = durations[0]
         result["second_execution_seconds"] = durations[1]
         result.update(verify(value, reference() if callable(reference) else reference))
@@ -77,8 +94,8 @@ def execute_operation(name, fn, reference=None):
         if described:
             result["dtype"] = described[0]["dtype"]
             result["shape"] = described[0]["shape"]
-            result["device"] = described[0]["device"]
-        result["completed_on_tpu"] = all(item.device.type == "xla" for item in tensors(value))
+            result["output_device"] = described[0]["device"]
+        classify_execution(result, bool(tensors(value)) and all(item.device.type == "xla" for item in tensors(value)), fallback_ops)
     except Exception as e:
         result["status"] = "failed"
         if durations:
@@ -89,6 +106,10 @@ def execute_operation(name, fn, reference=None):
 
 def run_operation(name, fn, reference=None):
     return execute_operation(name, fn, reference)[0]
+
+
+def operation_succeeded(result):
+    return result["status"] in ("native_passed", "functional_passed", "functional_passed_with_fallback")
 
 
 def kitchen_probes(device, large):
@@ -110,7 +131,7 @@ def kitchen_probes(device, large):
     tensorwise_name = "comfy_kitchen.quantize_int8_tensorwise"
     tensorwise_result, tensorwise = execute_operation(tensorwise_name, lambda: ck.quantize_int8_tensorwise(weight))
     operations.append(tensorwise_result)
-    if tensorwise_result["status"] == "passed":
+    if operation_succeeded(tensorwise_result):
         qweight, weight_scale = tensorwise
         operations.append(run_operation("comfy_kitchen.dequantize_int8_simple_dtype", lambda: torch.ops.comfy_kitchen.dequantize_int8_simple_dtype(qweight, weight_scale, DTYPE_TO_CODE[torch.bfloat16])))
         operations.append(run_operation("comfy_kitchen.int8_linear", lambda: ck.int8_linear(x, qweight, weight_scale, bias=bias, out_dtype=torch.bfloat16), lambda: F.linear(x, qweight.float().mul(weight_scale).to(torch.bfloat16), bias)))
@@ -129,7 +150,7 @@ def kitchen_probes(device, large):
         failed = operation_result("comfy_kitchen.quantize_and_rotate_rowwise", status="failed")
         failed["error"] = f"{type(e).__name__}: {e}"
         operations.append(failed)
-    if convrot_result["status"] == "passed":
+    if operation_succeeded(convrot_result):
         qconvrot, convrot_scale = convrot
         operations.append(run_operation("comfy_kitchen.dequantize_int8_convrot_weight_dtype", lambda: torch.ops.comfy_kitchen.dequantize_int8_convrot_weight_dtype(qconvrot, convrot_scale, group_size, DTYPE_TO_CODE[torch.bfloat16])))
         operations.append(run_operation("comfy_kitchen.int8_linear_convrot", lambda: ck.int8_linear(x, qconvrot, convrot_scale, bias=bias, out_dtype=torch.bfloat16, convrot=True, convrot_groupsize=group_size), lambda: F.linear(x, weight, bias)))
@@ -147,12 +168,58 @@ def metrics_report():
         return f"Unavailable: {e}"
 
 
+def parse_metrics_counters(report):
+    counters = {}
+    current = None
+    for line in str(report).splitlines():
+        match = re.match(r"Counter:\s*(\S+)", line.strip())
+        if match:
+            current = match.group(1)
+            continue
+        value = re.match(r"Value:\s*(\d+)", line.strip())
+        if current and value:
+            counters[current] = int(value.group(1))
+            current = None
+    return counters
+
+
+def metrics_counters():
+    return parse_metrics_counters(metrics_report())
+
+
+def counter_delta(before, after):
+    return {name: value - before.get(name, 0) for name, value in after.items() if value > before.get(name, 0)}
+
+
+def int8_experiments(device, realistic=False):
+    shapes = [(32, 4096, 4096)]
+    if realistic:
+        shapes.append((256, 4096, 4096))
+    results = []
+    for rows, inner, columns in shapes:
+        a_cpu = torch.randint(-127, 128, (rows, inner), dtype=torch.int8)
+        b_cpu = torch.randint(-127, 128, (inner, columns), dtype=torch.int8)
+        reference = torch._int_mm(a_cpu, b_cpu)
+        a = a_cpu.to(device)
+        b = b_cpu.to(device)
+        reference_device = reference.to(device)
+        tpu.sync()
+        candidates = [
+            run_operation("torch._int_mm", lambda: torch._int_mm(a, b), reference_device),
+            run_operation("torch.int8_matmul", lambda: a @ b, reference_device),
+            run_operation("torch.int32_matmul", lambda: a.to(torch.int32) @ b.to(torch.int32), reference_device),
+        ]
+        results.append({"shape": {"rows": rows, "inner": inner, "columns": columns}, "reference": "CPU torch._int_mm (int32 accumulation)", "candidates": candidates})
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Execute representative ComfyUI inference operations on a TPU")
     parser.add_argument("--cache-dir")
     parser.add_argument("--large", action="store_true", help="Use transformer-sized Comfy Kitchen linear operations")
     parser.add_argument("--output", type=Path, default=Path("tpu_probe.json"))
     parser.add_argument("--diagnostics", type=Path, help="Write XLA compiler and metrics diagnostics into this directory")
+    parser.add_argument("--int8-experiments", action="store_true", help="Compare INT8 accumulation candidates against a CPU int32 reference")
     args = parser.parse_args()
     if args.diagnostics:
         args.diagnostics.mkdir(parents=True, exist_ok=True)
@@ -171,6 +238,7 @@ def main():
         "compilation": {},
         "fallbacks": [],
         "warnings": [],
+        "int8_experiments": [],
     }
     x = torch.randn(2, 32, 64, device=device, dtype=torch.bfloat16)
     matmul_inputs = {dtype: (torch.randn(256, 256, device=device, dtype=dtype), torch.randn(256, 256, device=device, dtype=dtype)) for dtype in (torch.float32, torch.bfloat16, torch.float16)}
@@ -203,6 +271,10 @@ def main():
         report["compilation"]["after_comfy_kitchen"] = metrics_report()
     except Exception as e:
         report["comfy_kitchen"] = {"error": f"{type(e).__name__}: {e}"}
+    report["compilation"]["before_int8_experiments"] = metrics_report()
+    if args.int8_experiments:
+        report["int8_experiments"] = int8_experiments(device, args.large)
+        report["compilation"]["after_int8_experiments"] = metrics_report()
     report["compilation"]["final"] = metrics_report()
     report["fallbacks"] = [line.strip() for phase in report["compilation"].values() for line in str(phase).splitlines() if "fallback" in line.lower() or "aten::" in line]
     failures = [item for item in report["operations"] + report.get("comfy_kitchen", {}).get("operations", []) if item.get("status") in ("failed", "blocked")]
@@ -212,6 +284,8 @@ def main():
     if args.diagnostics:
         for phase, metrics in report["compilation"].items():
             (args.diagnostics / f"xla_metrics_{phase}.txt").write_text(str(metrics), encoding="utf-8")
+        if report["int8_experiments"]:
+            (args.diagnostics / "int8_experiments.json").write_text(json.dumps(report["int8_experiments"], indent=2, default=str) + "\n", encoding="utf-8")
     print(f"TPU probe completed: {len(report['operations']) + len(report.get('comfy_kitchen', {}).get('operations', []))} operations, {len(failures)} failures")
     print("TPU validation artifacts:")
     print(f"- {args.output.resolve()}")

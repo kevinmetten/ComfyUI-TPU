@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import glob
 import importlib.metadata
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -12,6 +14,19 @@ from packaging.version import Version
 
 TPU_WHEEL_INDEX = "https://storage.googleapis.com/libtpu-releases/index.html"
 PACKAGES = ("torch", "torchvision", "torchaudio", "torch-xla", "libtpu")
+
+
+def detect_tpu(environ=None, glob_paths=glob.glob):
+    environ = os.environ if environ is None else environ
+    environment_detected = any(environ.get(name) for name in ("COLAB_TPU_ADDR", "TPU_NAME", "TPU_TYPE", "TPU_ACCELERATOR_TYPE"))
+    accel_devices = glob_paths("/dev/accel*")
+    vfio_groups = [path for path in glob_paths("/dev/vfio/*") if os.path.basename(path).isdigit()]
+    return {
+        "detected": bool(environment_detected or accel_devices or vfio_groups),
+        "accelerator_type": environ.get("TPU_ACCELERATOR_TYPE") or environ.get("TPU_TYPE"),
+        "accel_devices": accel_devices,
+        "vfio_groups": vfio_groups,
+    }
 
 
 def installed_stack(version=importlib.metadata.version):

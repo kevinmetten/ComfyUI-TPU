@@ -2,6 +2,7 @@ import sys
 import types
 import zipfile
 import json
+import io
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ import torch
 from comfy import tpu
 from tools import tpu_cache
 from tools import tpu_colab_setup
+from tools import tpu_colab_launch
 from tools import tpu_probe
 
 
@@ -138,7 +140,7 @@ def test_comfy_kitchen_probe_uses_current_int8_api(monkeypatch):
         "comfy_kitchen.int8_linear_convrot",
     }
     assert all(operation["error"] is None for operation in result["operations"])
-    assert all(operation["status"] == "passed" for operation in result["operations"])
+    assert all(operation["status"] == "functional_passed" for operation in result["operations"])
 
 
 def test_comfy_kitchen_probe_blocks_tensorwise_dependents(monkeypatch):
@@ -153,8 +155,8 @@ def test_comfy_kitchen_probe_blocks_tensorwise_dependents(monkeypatch):
     assert operations["comfy_kitchen.dequantize_int8_simple_dtype"]["status"] == "blocked"
     assert operations["comfy_kitchen.int8_linear"]["status"] == "blocked"
     assert operations["comfy_kitchen.int8_linear"]["blocked_by"] == "comfy_kitchen.quantize_int8_tensorwise"
-    assert operations["comfy_kitchen.quantize_int8_convrot_weight"]["status"] == "passed"
-    assert operations["comfy_kitchen.int8_linear_convrot"]["status"] == "passed"
+    assert operations["comfy_kitchen.quantize_int8_convrot_weight"]["status"] == "functional_passed"
+    assert operations["comfy_kitchen.int8_linear_convrot"]["status"] == "functional_passed"
 
 
 def test_colab_notebook_targets_existing_pr_branch():
@@ -227,3 +229,80 @@ def test_unresolvable_tpu_stack_has_actionable_error():
     result = types.SimpleNamespace(returncode=1, stdout="", stderr="official index unavailable")
     with pytest.raises(RuntimeError, match="official PyTorch/XLA TPU package index"):
         tpu_colab_setup.latest_xla_version(lambda *args, **kwargs: result)
+
+
+@pytest.mark.parametrize(
+    ("environment", "paths", "detected"),
+    [
+        ({"TPU_ACCELERATOR_TYPE": "v5e-1"}, {}, True),
+        ({}, {"/dev/vfio/*": ["/dev/vfio/vfio", "/dev/vfio/0"]}, True),
+        ({}, {"/dev/accel*": ["/dev/accel0"]}, True),
+        ({"COLAB_TPU_ADDR": "10.0.0.1"}, {}, True),
+        ({}, {"/dev/vfio/*": ["/dev/vfio/vfio"]}, False),
+        ({}, {}, False),
+    ],
+)
+def test_tpu_detection(environment, paths, detected):
+    result = tpu_colab_setup.detect_tpu(environment, lambda pattern: paths.get(pattern, []))
+    assert result["detected"] is detected
+
+
+def test_metrics_delta_attributes_int_mm_fallback(monkeypatch):
+    reports = iter(({}, {"aten::_int_mm": 2}))
+    monkeypatch.setattr(tpu_probe, "metrics_counters", lambda: next(reports))
+    monkeypatch.setattr(tpu_probe.tpu, "sync", lambda: None)
+    result = tpu_probe.run_operation("int8", lambda: torch.ones(1))
+    assert result["status"] == "functional_passed_with_fallback"
+    assert result["fallback_ops"] == ["aten::_int_mm"]
+    assert result["cpu_fallback_detected"] is True
+    assert result["fully_xla_native"] is False
+
+
+def test_output_on_xla_does_not_imply_native_execution():
+    result = tpu_probe.operation_result("int8")
+    tpu_probe.classify_execution(result, True, ["aten::_int_mm"])
+    assert result["output_on_xla"] is True
+    assert result["fully_xla_native"] is False
+
+
+def test_parse_metrics_counters():
+    report = "Counter: aten::_int_mm\n  Value: 4\nCounter: CompileTime\n  Value: 2\n"
+    assert tpu_probe.parse_metrics_counters(report) == {"aten::_int_mm": 4, "CompileTime": 2}
+    assert tpu_probe.counter_delta({"aten::_int_mm": 2}, {"aten::_int_mm": 4}) == {"aten::_int_mm": 2}
+
+
+class FakeProcess:
+    def __init__(self, codes, lines=()):
+        self.codes = iter(codes)
+        self.returncode = None
+        self.stdout = io.StringIO("".join(lines))
+        self.pid = 123
+
+    def poll(self):
+        code = next(self.codes, None)
+        self.returncode = code
+        return code
+
+
+def test_wait_for_server_becomes_healthy(tmp_path):
+    server = FakeProcess([None, None])
+    assert tpu_colab_launch.wait_for_server(server, tmp_path / "log", status=lambda: 200, sleep=lambda _: None) == 200
+
+
+def test_wait_for_server_reports_early_exit(tmp_path):
+    log = tmp_path / "log"
+    log.write_text("startup failed")
+    server = FakeProcess([1])
+    with pytest.raises(RuntimeError, match="startup failed"):
+        tpu_colab_launch.wait_for_server(server, log, status=lambda: None, sleep=lambda _: None)
+
+
+def test_tunnel_url_and_heartbeat_failures():
+    tunnel = FakeProcess([None], ["https://test.trycloudflare.com ready\n"])
+    assert tpu_colab_launch.wait_for_tunnel_url(tunnel) == "https://test.trycloudflare.com"
+    healthy, message = tpu_colab_launch.heartbeat_state(FakeProcess([None]), FakeProcess([None]), status=lambda: 200)
+    assert healthy and message == "alive"
+    healthy, message = tpu_colab_launch.heartbeat_state(FakeProcess([1]), FakeProcess([None]), status=lambda: 200)
+    assert not healthy and "ComfyUI exited" in message
+    healthy, message = tpu_colab_launch.heartbeat_state(FakeProcess([None]), FakeProcess([1]), status=lambda: 200)
+    assert not healthy and "cloudflared exited" in message
