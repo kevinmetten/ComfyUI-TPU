@@ -6,7 +6,7 @@ The Colab notebook clones `https://github.com/kevinmetten/ComfyUI-TPU.git`. Whil
 
 ## Start ComfyUI
 
-Use a Colab v5e-1 TPU runtime and install matching `torch`, `torchvision`, and `torch-xla[tpu]` wheels from the official PyTorch/XLA TPU package index. Then run:
+Use the notebook on a Colab v5e-1 TPU runtime, or run `python -m tools.tpu_colab_setup --ensure` to resolve the current compatible TPU stack before starting manually:
 
 ```bash
 python -m tools.tpu_probe --output tpu_probe.json --diagnostics diagnostics
@@ -32,4 +32,6 @@ Import before starting ComfyUI or the probe. The archive manifest is diagnostic;
 
 `--diagnostics diagnostics` enables PyTorch/XLA debug metrics and compiler dumps. Preserve `tpu_probe.json`, the diagnostics directory, and the ComfyUI startup log after the first hardware run.
 
-The first execution of each new shape compiles. Keep batch, latent dimensions, frame count, and token length stable across sampler steps to maximize reuse. TPU profiling should use the PyTorch/XLA profiler in the Colab runtime; no hardware performance claim is made until those traces are collected.
+The notebook runs `tools.tpu_colab_setup`, which queries the official TPU wheel index for the latest stable PyTorch/XLA release, asks pip's resolver for the exact matching Torch, TorchVision, TorchAudio, and libtpu tuple, and installs those exact versions together. A complete compatible installed tuple is retained. The filtered ComfyUI requirements install is followed by an exact version check so it cannot silently replace the selected TPU stack.
+
+Every probe measurement starts with a blocking barrier, times only the named operation, and ends with another blocking barrier. Inputs are created once outside kernel timing. Comfy Kitchen prerequisites are recorded and synchronized as their own operations; a failed prerequisite marks dependent operations as blocked. Metrics snapshots are written after core operations and before/after Kitchen operations. The first execution of each new shape may compile. Keep batch, latent dimensions, frame count, and token length stable across sampler steps to maximize reuse. No hardware performance claim is made until v5e artifacts are collected.

@@ -69,3 +69,13 @@ GitHub clone and web research were blocked by the environment. PyTorch/XLA was n
 - Dynamic offload behavior and oversized-model staging.
 - Portable cache reuse across independent Colab sessions.
 - Compilation, steady execution, host transfer, HBM, and host-RAM profiling.
+
+## Final static hardening before v5e validation
+
+- The notebook startup cell now uses a separately named startup-log path and syntactically valid process assertion. Unit tests compile every notebook Python cell in addition to checking the repository and PR branch.
+- `tools.tpu_colab_setup` dynamically selects the latest stable release advertised by the official PyTorch/XLA TPU index. A pip dry-run resolves an exact Torch, TorchVision, TorchAudio, PyTorch/XLA, and libtpu tuple; the tuple is installed together only when the existing environment is incomplete or incompatible.
+- ComfyUI requirements continue to exclude Torch packages, and the notebook verifies afterward that none of the exact selected TPU versions changed.
+- Probe inputs are created outside target timings. Each execution cycle is isolated by blocking pre- and post-operation synchronization, so lazy work from setup or a previous test cannot enter another operation's duration.
+- Comfy Kitchen quantization results are passed explicitly to their dependent dequantization and linear probes. Failures mark dependents `blocked` with `blocked_by` rather than producing misleading secondary errors.
+- Core, pre-Kitchen, post-Kitchen, and final XLA metrics snapshots are saved separately. Diagnostic environment variables are set before the first `torch_xla` import and TPU runtime initialization.
+- The ConvRot comparison remains `F.linear(x, weight, bias)`: the eager implementation applies the same normalized orthogonal Hadamard transform to activation and weight inner dimensions, so their product is mathematically the original linear transform before quantization error.
